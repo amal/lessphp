@@ -1,21 +1,15 @@
 <?php
 
 /**
- * lessphp v0.2.1
- * http://leafo.net/lessphp
- *
- * LESS css compiler, adapted from http://lesscss.org/docs.html
- *
- * Copyright 2010, Leaf Corcoran <leafot@gmail.com>
- * Licensed under MIT or GPLv3, see LICENSE
- */
-
-
-/**
  * The less compiler and parser.
  *
+ * lessphp v0.2.1
+ * LESS css compiler, adapted from http://lesscss.org/docs.html
+ * Copyright 2010, Leaf Corcoran <leafot at gmail dot com>
+ * Licensed under MIT or GPLv3, see LICENSE
+ *
  * Converting LESS to CSS is a two stage process. First the incoming document
- * must be parsed. Parsing creates a tree in memory that represents the 
+ * must be parsed. Parsing creates a tree in memory that represents the
  * structure of the document. Then, the tree of the document is recursively
  * compiled into the CSS text. The compile step has an implicit step called
  * reduction, where values are brought to their lowest form before being
@@ -31,22 +25,53 @@
  *    - parsing: lessc::parseChunk()
  *    - compiling: lessc::compileBlock()
  *
+ * @link http://leafo.net/lessphp
  */
-class lessc {
+class lessc
+{
+	/**
+	 * @var string
+	 */
 	protected $buffer;
+	/**
+	 * @var int
+	 */
 	protected $count;
+	/**
+	 * @var int
+	 */
 	protected $line;
+	/**
+	 * @var array
+	 */
+	protected $expandStack;
+	/**
+	 * @var array|null
+	 */
+	protected $store;
 
 	public $indentLevel;
 	public $indentChar = '  ';
 
+	/**
+	 * @var stdClass|null
+	 */
 	protected $env = null;
 
 	protected $allParsedFiles = array();
 
-	public $vPrefix = '@'; // prefix of abstract properties
-	public $mPrefix = '$'; // prefix of abstract blocks
-	public $imPrefix = '!'; // special character to add !important
+	/**
+	 * Prefix of abstract properties
+	 */
+	public $vPrefix = '@';
+	/**
+	 * Prefix of abstract blocks
+	 */
+	public $mPrefix = '$';
+	/**
+	 * Special character to add !important
+	 */
+	public $imPrefix = '!';
 	public $selfSelector = '&';
 
 	static protected $precedence = array(
@@ -56,28 +81,46 @@ class lessc {
 		'/' => 1,
 		'%' => 1,
 	);
-	static protected $operatorString; // regex string to match any of the operators
-
-	// types that have delayed computation
-	static protected $dtypes = array('expression', 'variable',
-		'function', 'negative', 'list', 'lookup');
 
 	/**
+	 * Regex to match any of the operators
+	 */
+	static protected $operatorString;
+
+	/**
+	 * Types that have delayed computation
+	 */
+	static protected $dtypes = array(
+		'expression', 'variable',
+		'function', 'negative', 'list', 'lookup'
+	);
+
+	/**
+	 * CSS units
+	 *
 	 * @link http://www.w3.org/TR/css3-values/
 	 */
-	static protected $units=array(
+	static protected $units = array(
 		'em', 'ex', 'px', 'gd', 'rem', 'vw', 'vh', 'vm', 'ch', // Relative length units
 		'in', 'cm', 'mm', 'pt', 'pc', // Absolute length units
 		'%', // Percentages
 		'deg', 'grad', 'rad', 'turn', // Angles
 		'ms', 's', // Times
-		'Hz', 'kHz', //Frequencies
+		'Hz', 'kHz', // Frequencies
 	);
-    
+
+	/**
+	 * Regexp for css units
+	 */
+	static protected $unitsRegexp = '(?:e(?:m|x)|p(?:x|t|c)|g(?:d|rad)|r(?:em|ad)|v(?:w|h|m)|c(?:h|m)|in|m(?:m|s)|%|deg|turn|s|Hz|kHz)';
+
 	public $importDisabled = false;
 	public $importDir = '';
 
-	public $compat = false; // lessjs compatibility mode, does nothing right now
+	/**
+	 * Lessjs compatibility mode, does nothing right now
+	 */
+	public $compat = false;
 
 	/**
 	 * if we are in an expression then we don't need to worry about parsing font shorthand
@@ -86,7 +129,7 @@ class lessc {
 	protected $inExp = false;
 
 	/**
-	 * if we are in parens we can be more liberal with whitespace around operators because 
+	 * if we are in parens we can be more liberal with whitespace around operators because
 	 * it must evaluate to a single value and thus is less ambiguous.
 	 *
 	 * Consider:
@@ -94,6 +137,98 @@ class lessc {
 	 *     property2: (10 -5); // should evaluate to 5
 	 */
 	protected $inParens = false;
+
+
+	/**
+	 * Initialize any static state, can initialize parser for a file
+	 *
+	 * @param null $fname
+	 * @param null $opts
+	 */
+	public function __construct($fname = null, $opts = null)
+	{
+		if (!self::$operatorString) {
+			self::$operatorString = '(' . implode('|', array_map(array($this, 'preg_quote'), array_keys(self::$precedence))) . ')';
+		}
+
+		if ($fname) {
+			if (!is_file($fname)) {
+				throw new Exception('load error: failed to find ' . $fname);
+			}
+			$pi = pathinfo($fname);
+
+			$this->fileName = $fname;
+			$this->importDir = $pi['dirname'] . '/';
+			$this->buffer = file_get_contents($fname);
+
+			$this->addParsedFile($fname);
+		}
+	}
+
+	/**
+	 * Parses and compile buffer
+	 *
+	 * @param null $str
+	 * @param null $initial_variables
+	 *
+	 * @return string
+	 */
+	public function parse($str = null, $initial_variables = null)
+	{
+		$locale = setlocale(LC_NUMERIC, 0);
+		setlocale(LC_NUMERIC, 'C');
+		$root = $this->parseTree($str);
+
+		if ($initial_variables) {
+			$this->injectVariables($initial_variables);
+		}
+		$out = $this->compileBlock($root);
+		setlocale(LC_NUMERIC, $locale);
+		return $out;
+	}
+
+	/**
+	 * @throws Exception
+	 * @param null $str
+	 * @return null|stdClass
+	 */
+	protected function parseTree($str = null)
+	{
+		$this->prepareParser($str !== null ? $str : $this->buffer);
+		while (false !== $this->parseChunk()) {
+			;
+		}
+
+		if ($this->count !== strlen($this->buffer)) {
+			$this->throwParseError();
+		}
+
+		if ($this->env->parent !== null) {
+			throw new Exception('parse error: unclosed block');
+		}
+
+		$root = $this->env;
+		$this->env = null;
+		return $root;
+	}
+
+	/**
+	 * @throws Exception
+	 * @param string $msg
+	 */
+	protected function throwParseError($msg = 'parse error')
+	{
+		$line = $this->line + substr_count(substr($this->buffer, 0, $this->count), "\n");
+		if (isset($this->fileName)) {
+			$loc = $this->fileName . ' on line ' . $line;
+		} else {
+			$loc = "line: " . $line;
+		}
+
+		if ($this->peek("(.*?)(\n|$)", $m)) {
+			throw new Exception($msg . ': failed at `' . $m[1] . '` ' . $loc);
+		}
+	}
 
 	/**
 	 * Parse a single chunk off the head of the buffer and place it.
@@ -123,21 +258,24 @@ class lessc {
 	 * grammatical rules, you can chain them together using &&.
 	 *
 	 * But, if some of the rules in the chain succeed before one fails, then
-	 * then buffer position will be left at an invalid state. In order to 
+	 * then buffer position will be left at an invalid state. In order to
 	 * avoid this, lessc::seek() is used to remember and set buffer positions.
 	 *
 	 * Before doing a chain, use $s = $this->seek() to remember the current
-	 * position into $s. Then if a chain fails, use $this->seek($s) to 
+	 * position into $s. Then if a chain fails, use $this->seek($s) to
 	 * go back where we started.
 	 */
-	function parseChunk() {
-		if (empty($this->buffer)) return false;
+	public function parseChunk()
+	{
+		if (!$this->buffer) {
+			return false;
+		}
 		$s = $this->seek();
-		
+
 		// setting a property
 		if ($this->keyword($key) && $this->assign() &&
-			$this->propertyValue($value) && $this->end())
-		{
+				$this->propertyValue($value) && $this->end()
+		) {
 			$this->append(array('assign', $key, $value));
 			return true;
 		} else {
@@ -150,27 +288,22 @@ class lessc {
 
 			// a font-face block
 			if ($this->literal('@font-face') && $this->literal('{')) {
-				$b = $this->pushSpecialBlock('@font-face');
+				$this->pushSpecialBlock('@font-face');
 				return true;
 			} else {
 				$this->seek($s);
 			}
 
 			// charset
-			if ($this->literal('@charset') && $this->propertyValue($value) &&
-				$this->end())
-			{
+			if ($this->literal('@charset') && $this->propertyValue($value) && $this->end()) {
 				$this->append(array('charset', $value));
 				return true;
 			} else {
 				$this->seek($s);
 			}
 
-
 			// media
-			if ($this->literal('@media') && $this->mediaTypes($types, $rest) &&
-				$this->literal('{'))
-			{
+			if ($this->literal('@media') && $this->mediaTypes($types, $rest) && $this->literal('{')) {
 				$b = $this->pushSpecialBlock('@media');
 				$b->media = array($types, $rest);
 				return true;
@@ -179,9 +312,7 @@ class lessc {
 			}
 
 			// css animations
-			if ($this->match('(@(-[a-z]+-)?keyframes)', $m) &&
-				$this->propertyValue($value) && $this->literal('{'))
-			{
+			if ($this->match('(@(-[a-z]+-)?keyframes)', $m) && $this->propertyValue($value) && $this->literal('{')) {
 				$b = $this->pushSpecialBlock(trim($m[0]));
 				$b->keyframes = $value;
 				return true;
@@ -200,10 +331,8 @@ class lessc {
 		}
 
 		// setting a variable
-		if ($this->variable($name) && $this->assign() &&
-			$this->propertyValue($value) && $this->end())
-		{
-			$this->append(array('assign', $this->vPrefix.$name, $value));
+		if ($this->variable($name) && $this->assign() && $this->propertyValue($value) && $this->end()) {
+			$this->append(array('assign', $this->vPrefix . $name, $value));
 			return true;
 		} else {
 			$this->seek($s);
@@ -211,7 +340,7 @@ class lessc {
 
 		if ($this->import($url, $media)) {
 			// don't check .css files
-			if (empty($media) && substr_compare($url, '.css', -4, 4) !== 0) {
+			if (empty($media) && substr_compare($url, '.css', -4)) {
 				if ($this->importDisabled) {
 					$this->append(array('raw', '/* import disabled */'));
 				} else {
@@ -222,16 +351,12 @@ class lessc {
 					}
 				}
 			}
-
-			$this->append(array('raw', '@import url("'.$url.'")'.
-				($media ? ' '.$media : '').';'));
+			$this->append(array('raw', '@import url("'.$url.'")' . ($media ? ' '.$media : '') . ';'));
 			return true;
 		}
 
 		// opening parametric mixin
-		if ($this->tag($tag, true) && $this->argumentDef($args) &&
-			$this->literal('{'))
-		{
+		if ($this->tag($tag, true) && $this->argumentDef($args) && $this->literal('{')) {
 			$block = $this->pushBlock($this->fixTags(array($tag)));
 			$block->args = $args;
 			return true;
@@ -252,32 +377,33 @@ class lessc {
 		if ($this->literal('}')) {
 			try {
 				$block = $this->pop();
-			} catch (exception $e) {
+			} catch (Exception $e) {
 				$this->seek($s);
 				$this->throwParseError($e->getMessage());
+				return true;
 			}
 
 			$hidden = true;
-			if (!isset($block->args)) foreach ($block->tags as $tag) {
-				if ($tag{0} != $this->mPrefix) {
-					$hidden = false;
-					break;
+			if (!isset($block->args)) {
+				foreach ($block->tags as $tag) {
+					if ($tag[0] != $this->mPrefix) {
+						$hidden = false;
+						break;
+					}
 				}
 			}
 
-			if (!$hidden) $this->append(array('block', $block));
+			if (!$hidden) {
+				$this->append(array('block', $block));
+			}
 			foreach ($block->tags as $tag) {
 				$this->env->children[$tag] = $block;
 			}
-
 			return true;
 		}
 
-
-		// mixin 
-		if ($this->tags($tags, true, '>') &&
-			($this->argumentValues($argv) || true) && $this->end())
-		{
+		// mixin
+		if ($this->tags($tags, true, '>') && ($this->argumentValues($argv) || true) && $this->end()) {
 			$tags = $this->fixTags($tags);
 			$this->append(array('mixin', $tags, $argv));
 			return true;
@@ -285,24 +411,43 @@ class lessc {
 			$this->seek($s);
 		}
 		// spare ;
-		if ($this->literal(';')) return true;
+		if ($this->literal(';')) {
+			return true;
+		}
 
-		return false; // got nothing, throw error
+		// got nothing, throw error
+		return false;
 	}
 
-	function fixTags($tags) {
-		// move @ tags out of variable namespace
+	/**
+	 * Move @ tags out of variable namespace
+	 *
+	 * @param array $tags
+	 *
+	 * @return array
+	 */
+	public function fixTags($tags)
+	{
 		foreach ($tags as &$tag) {
-			if ($tag{0} == $this->vPrefix) $tag[0] = $this->mPrefix;
+			if ($tag[0] === $this->vPrefix) {
+				$tag[0] = $this->mPrefix;
+			}
 		}
 		return $tags;
 	}
 
-	// attempts to find the path of an import url, returns null for css files
-	function findImport($url) {
-		foreach ((array)$this->importDir as $dir) {
-			$full = $dir.(substr($dir, -1) != '/' ? '/' : '').$url;
-			if ($this->fileExists($file = $full.'.less') || $this->fileExists($file = $full)) {
+	/**
+	 * Attempts to find the path of an import url, returns null for css files
+	 *
+	 * @param $url
+	 *
+	 * @return null|string
+	 */
+	public function findImport($url)
+	{
+		foreach ((array) $this->importDir as $dir) {
+			$full = $dir . (substr($dir, -1) != '/' ? '/' : '') . $url;
+			if ($this->fileExists($file = $full . '.less') || $this->fileExists($file = $full)) {
 				return $file;
 			}
 		}
@@ -310,20 +455,33 @@ class lessc {
 		return null;
 	}
 
-	function fileExists($name) {
+	/**
+	 * @param $name
+	 * @return bool
+	 */
+	public function fileExists($name)
+	{
 		// sym link workaround
 		return file_exists($name) || file_exists(realpath(preg_replace('/\w+\/\.\.\//', '', $name)));
 	}
 
-	// a list of expressions
-	function expressionList(&$exps) {
-		$values = array();	
+	/**
+	 * A list of expressions
+	 *
+	 * @param $exps
+	 * @return bool
+	 */
+	public function expressionList(&$exps)
+	{
+		$values = array();
 
 		while ($this->expression($exp)) {
 			$values[] = $exp;
 		}
-		
-		if (count($values) == 0) return false;
+
+		if (count($values) == 0) {
+			return false;
+		}
 
 		$exps = $this->compressList($values, ' ');
 		return true;
@@ -331,9 +489,15 @@ class lessc {
 
 	/**
 	 * Attempt to consume an expression.
+	 *
 	 * @link http://en.wikipedia.org/wiki/Operator-precedence_parser#Pseudo-code
+	 *
+	 * @param $out
+	 *
+	 * @return bool
 	 */
-	function expression(&$out) {
+	public function expression(&$out)
+	{
 		$s = $this->seek();
 		if ($this->literal('(') && ($this->inExp = $this->inParens = true) && $this->expression($exp) && $this->literal(')')) {
 			$lhs = $exp;
@@ -351,9 +515,15 @@ class lessc {
 	}
 
 	/**
-	 * recursively parse infix equation with $lhs at precedence $minP
+	 * Recursively parse infix equation with $lhs at precedence $minP
+	 *
+	 * @param $lhs
+	 * @param $minP
+	 *
+	 * @return array
 	 */
-	function expHelper($lhs, $minP) {
+	public function expHelper($lhs, $minP)
+	{
 		$this->inExp = true;
 		$ss = $this->seek();
 
@@ -366,7 +536,7 @@ class lessc {
 		}
 
 		// try to find a valid operator
-		while ($this->match(self::$operatorString.($needWhite ? '\s' : ''), $m) && self::$precedence[$m[1]] >= $minP) {
+		while ($this->match(self::$operatorString . ($needWhite ? '\s' : ''), $m) && self::$precedence[$m[1]] >= $minP) {
 			// get rhs
 			$s = $this->seek();
 			$p = $this->inParens;
@@ -388,10 +558,13 @@ class lessc {
 			}
 
 			// don't evaluate yet if it is dynamic
-			if (in_array($rhs[0], self::$dtypes) || in_array($lhs[0], self::$dtypes))
+			if (in_array($rhs[0], self::$dtypes) || in_array($lhs[0], self::$dtypes)) {
 				$lhs = array('expression', $m[1], $lhs, $rhs);
+			}
 			else
+			{
 				$lhs = $this->evaluate($m[1], $lhs, $rhs);
+			}
 
 			$ss = $this->seek();
 
@@ -405,34 +578,57 @@ class lessc {
 		return $lhs;
 	}
 
-	// consume a list of values for a property
-	function propertyValue(&$value) {
-		$values = array();	
-		
+	/**
+	 * Consume a list of values for a property
+	 *
+	 * @param $value
+	 *
+	 * @return bool
+	 */
+	public function propertyValue(&$value)
+	{
+		$values = array();
+
 		$s = null;
 		while ($this->expressionList($v)) {
 			$values[] = $v;
 			$s = $this->seek();
-			if (!$this->literal(',')) break;
+			if (!$this->literal(',')) {
+				break;
+			}
 		}
 
-		if ($s) $this->seek($s);
+		if ($s) {
+			$this->seek($s);
+		}
 
-		if (count($values) == 0) return false;
+		if (count($values) == 0) {
+			return false;
+		}
 
 		$value = $this->compressList($values, ', ');
+
 		return true;
 	}
 
-	// a single value
-	function value(&$value) {
+	/**
+	 * A single value
+	 *
+	 * @param $value
+	 *
+	 * @return bool
+	 */
+	public function value(&$value)
+	{
 		// try a unit
-		if ($this->unit($value)) return true;	
+		if ($this->unit($value)) {
+			return true;
+		}
 
 		// see if there is a negation
 		$s = $this->seek();
 		if ($this->literal('-', false) && $this->variable($vname)) {
-			$value = array('negative', array('variable', $this->vPrefix.$vname));
+			$value = array('negative', array('variable', $this->vPrefix . $vname));
 			return true;
 		} else {
 			$this->seek($s);
@@ -446,17 +642,21 @@ class lessc {
 			$value = $a;
 			return true;
 		}
-		
+
 		// color
-		if ($this->color($value)) return true;
+		if ($this->color($value)) {
+			return true;
+		}
 
 		// css function
 		// must be done after color
-		if ($this->func($value)) return true;
+		if ($this->func($value)) {
+			return true;
+		}
 
 		// string
 		if ($this->string($tmp, $d)) {
-			$value = array('string', $d.$tmp.$d);
+			$value = array('string', $d . $tmp . $d);
 			return true;
 		}
 
@@ -468,23 +668,37 @@ class lessc {
 
 		// try a variable
 		if ($this->variable($vname)) {
-			$value = array('variable', $this->vPrefix.$vname);
+			$value = array('variable', $this->vPrefix . $vname);
 			return true;
 		}
 
 		return false;
 	}
 
-	// an import statement
-	function import(&$url, &$media) {
+	/**
+	 * An import statement
+	 *
+	 * @param $url
+	 * @param $media
+	 *
+	 * @return bool
+	 */
+	public function import(&$url, &$media)
+	{
 		$s = $this->seek();
-		if (!$this->literal('@import')) return false;
+		if (!$this->literal('@import')) {
+			return false;
+		}
 
 		// @import "something.css" media;
 		// @import url("something.css") media;
 		// @import url(something.css) media; 
 
-		if ($this->literal('url(')) $parens = true; else $parens = false;
+		if ($this->literal('url(')) {
+			$parens = true;
+		} else {
+			$parens = false;
+		}
 
 		if (!$this->string($url)) {
 			if ($parens && $this->to(')', $url)) {
@@ -504,13 +718,23 @@ class lessc {
 		return $this->to(';', $media, false, true);
 	}
 
-	// a list of media types, very lenient
-	function mediaTypes(&$types, &$rest) {
-		$s = $this->seek();
+	/**
+	 * A list of media types, very lenient
+	 *
+	 * @param $types
+	 * @param $rest
+	 *
+	 * @return bool
+	 */
+	public function mediaTypes(&$types, &$rest)
+	{
+//		$s = $this->seek();
 		$types = array();
 		while ($this->match('([^,{\s]+)', $m)) {
 			$types[] = $m[1];
-			if (!$this->literal(',')) break;
+			if (!$this->literal(',')) {
+				break;
+			}
 		}
 
 		// get everything else
@@ -521,9 +745,16 @@ class lessc {
 		return count($types) > 0;
 	}
 
-	// a scoped value accessor
-	// .hello > @scope1 > @scope2['value'];
-	function accessor(&$var) {
+	/**
+	 * A scoped value accessor
+	 * .hello > &#64;scope1 > &#64;scope2['value'];
+	 *
+	 * @param $var
+	 *
+	 * @return bool
+	 */
+	public function accessor(&$var)
+	{
 		$s = $this->seek();
 
 		if (!$this->tags($scope, true, '>') || !$this->literal('[')) {
@@ -534,7 +765,7 @@ class lessc {
 		// either it is a variable or a property
 		// why is a property wrapped in quotes, who knows!
 		if ($this->variable($name)) {
-			$name = $this->vPrefix.$name;
+			$name = $this->vPrefix . $name;
 		} elseif ($this->literal("'") && $this->keyword($name) && $this->literal("'")) {
 			// .. $this->count is messed up if we wanted to test another access type
 		} else {
@@ -551,8 +782,16 @@ class lessc {
 		return true;
 	}
 
-	// a string 
-	function string(&$string, &$d = null) {
+	/**
+	 * A string
+	 *
+	 * @param $string
+	 * @param null $d
+	 *
+	 * @return bool
+	 */
+	public function string(&$string, &$d = null)
+	{
 		$s = $this->seek();
 		if ($this->literal('"', false)) {
 			$delim = '"';
@@ -566,7 +805,7 @@ class lessc {
 			$this->seek($s);
 			return false;
 		}
-		
+
 		$d = $delim;
 		return true;
 	}
@@ -575,20 +814,30 @@ class lessc {
 	 * Consume a number and optionally a unit.
 	 * Can also consume a font shorthand if it is a simple case.
 	 * $allowed restricts the types that are matched.
+	 *
+	 * @param $unit
+	 * @param null $allowed
+	 *
+	 * @return bool
 	 */
-	function unit(&$unit, $allowed = null) {
+	public function unit(&$unit, $allowed = null)
+	{
 		$simpleCase = $allowed == null;
-		if (!$allowed) $allowed = self::$units;
+		if (!$allowed) {
+			$allowed = self::$units;
+		}
 
-		if ($this->match('(-?[0-9]*(\.)?[0-9]+)('.implode('|', $allowed).')?', $m, !$simpleCase)) {
-			if (!isset($m[3])) $m[3] = 'number';
+		if ($this->match('(-?[0-9]*(\.)?[0-9]+)(' . implode('|', $allowed) . ')?', $m, !$simpleCase)) {
+			if (!isset($m[3])) {
+				$m[3] = 'number';
+			}
 			$unit = array($m[3], $m[1]);
 
 			// check for size/height font unit.. should this even be here?
 			if ($simpleCase) {
 				$s = $this->seek();
 				if (!$this->inExp && $this->literal('/', false) && $this->unit($right, self::$units)) {
-					$unit = array('keyword', $this->compileValue($unit).'/'.$this->compileValue($right));
+					$unit = array('keyword', $this->compileValue($unit) . '/' . $this->compileValue($right));
 				} else {
 					// get rid of whitespace
 					$this->seek($s);
@@ -602,8 +851,15 @@ class lessc {
 		return false;
 	}
 
-	// a # color
-	function color(&$out) {
+	/**
+	 * A # color
+	 *
+	 * @param $out
+	 *
+	 * @return bool
+	 */
+	public function color(&$out)
+	{
 		$color = array('color');
 
 		if ($this->match('(#([0-9a-f]{6})|#([0-9a-f]{3}))', $m)) {
@@ -616,49 +872,75 @@ class lessc {
 			}
 
 			$num = hexdec($num);
-			foreach (array(3,2,1) as $i) {
+			foreach (array(3, 2, 1) as $i) {
 				$t = $num % $width;
 				$num /= $width;
 
-				$color[$i] = $t * (256/$width) + $t * floor(16/$width);
+				$color[$i] = $t * (256 / $width) + $t * floor(16 / $width);
 			}
-			
+
 			$out = $color;
 			return true;
-		} 
+		}
 
 		return false;
 	}
 
-	// consume a list of property values delimited by ; and wrapped in ()
-	function argumentValues(&$args, $delim = ';') {
+	/**
+	 * Consume a list of property values delimited by ; and wrapped in ()
+	 *
+	 * @param $args
+	 * @param string $delim
+	 *
+	 * @return bool
+	 */
+	public function argumentValues(&$args, $delim = ';')
+	{
 		$s = $this->seek();
-		if (!$this->literal('(')) return false;
+		if (!$this->literal('(')) {
+			return false;
+		}
 
 		$values = array();
 		while (true) {
-			if ($this->propertyValue($value)) $values[] = $value;
-			if (!$this->literal($delim)) break;
+			if ($this->propertyValue($value)) {
+				$values[] = $value;
+			}
+			if (!$this->literal($delim)) {
+				break;
+			}
 			else {
-				if ($value == null) $values[] = null;
+				if ($value == null) {
+					$values[] = null;
+				}
 				$value = null;
 			}
-		}	
+		}
 
 		if (!$this->literal(')')) {
 			$this->seek($s);
 			return false;
 		}
-		
+
 		$args = $values;
 		return true;
 	}
 
-	// consume an argument definition list surrounded by ()
-	// each argument is a variable name with optional value
-	function argumentDef(&$args, $delim = ';') {
+	/**
+	 * Consume an argument definition list surrounded by ()
+	 * each argument is a variable name with optional value
+	 *
+	 * @param $args
+	 * @param string $delim
+	 *
+	 * @return bool
+	 */
+	public function argumentDef(&$args, $delim = ';')
+	{
 		$s = $this->seek();
-		if (!$this->literal('(')) return false;
+		if (!$this->literal('(')) {
+			return false;
+		}
 
 		$values = array();
 		while ($this->variable($vname)) {
@@ -669,7 +951,9 @@ class lessc {
 			}
 
 			$values[] = $arg;
-			if (!$this->literal($delim)) break;
+			if (!$this->literal($delim)) {
+				break;
+			}
 		}
 
 		if (!$this->literal(')')) {
@@ -681,26 +965,48 @@ class lessc {
 		return true;
 	}
 
-	// consume a list of tags
-	// this accepts a hanging delimiter
-	function tags(&$tags, $simple = false, $delim = ',') {
+	/**
+	 * Consume a list of tags
+	 * this accepts a hanging delimiter
+	 *
+	 * @param $tags
+	 * @param bool $simple
+	 * @param string $delim
+	 *
+	 * @return bool
+	 */
+	public function tags(&$tags, $simple = false, $delim = ',')
+	{
 		$tags = array();
 		while ($this->tag($tt, $simple)) {
 			$tags[] = $tt;
-			if (!$this->literal($delim)) break;
+			if (!$this->literal($delim)) {
+				break;
+			}
 		}
-		if (count($tags) == 0) return false;
+		if (count($tags) == 0) {
+			return false;
+		}
 
 		return true;
 	}
 
-	// a bracketed value (contained within in a tag definition)
-	function tagBracket(&$value) {
+	/**
+	 * A bracketed value (contained within in a tag definition)
+	 *
+	 * @param $value
+	 *
+	 * @return bool
+	 */
+	public function tagBracket(&$value)
+	{
 		$s = $this->seek();
 		if ($this->literal('[') && $this->to(']', $c, true) && $this->literal(']', false)) {
-			$value = '['.$c.']';
+			$value = '[' . $c . ']';
 			// whitespace?
-			if ($this->match('', $_)) $value .= $_[0];
+			if ($this->match('', $_)) {
+				$value .= $_[0];
+			}
 			return true;
 		}
 
@@ -708,29 +1014,49 @@ class lessc {
 		return false;
 	}
 
-	// a single tag
-	function tag(&$tag, $simple = false) {
-		if ($simple)
+	/**
+	 * A single tag
+	 *
+	 * @param $tag
+	 * @param bool $simple
+	 *
+	 * @return bool
+	 */
+	public function tag(&$tag, $simple = false)
+	{
+		if ($simple) {
 			$chars = '^,:;{}\][>\(\) ';
-		else
+		} else {
 			$chars = '^,;{}[';
+		}
 
 		$tag = '';
-		while ($this->tagBracket($first)) $tag .= $first;
-		while ($this->match('(['.$chars.'0-9]['.$chars.']*)', $m)) {
+		while ($this->tagBracket($first)) {
+			$tag .= $first;
+		}
+		while ($this->match('([' . $chars . '0-9][' . $chars . ']*)', $m)) {
 			$tag .= $m[1];
-			if ($simple) break;
-
-			while ($this->tagBracket($brack)) $tag .= $brack;
+			if ($simple) {
+				break;
+			}
+			while ($this->tagBracket($brack)) {
+				$tag .= $brack;
+			}
 		}
 		$tag = trim($tag);
-		if ($tag == '') return false;
 
-		return true;
+		return $tag !== '';
 	}
 
-	// a css function
-	function func(&$func) {
+	/**
+	 * A css function
+	 *
+	 * @param $func
+	 *
+	 * @return bool
+	 */
+	public function func(&$func)
+	{
 		$s = $this->seek();
 
 		if ($this->match('([\w\-_][\w\-_:\.]*)', $m) && $this->literal('(')) {
@@ -751,7 +1077,9 @@ class lessc {
 						}
 					}
 
-					if (!$this->literal(',')) break;
+					if (!$this->literal(',')) {
+						break;
+					}
 				}
 				$args = array('list', ',', $args);
 			}
@@ -766,11 +1094,18 @@ class lessc {
 		return false;
 	}
 
-	// consume a less variable
-	function variable(&$name) {
-		$s = $this->seek();
+	/**
+	 * Consume a less variable
+	 *
+	 * @param $name
+	 *
+	 * @return bool
+	 */
+	public function variable(&$name)
+	{
+//		$s = $this->seek();
 		if ($this->literal($this->vPrefix, false) && $this->keyword($name)) {
-			return true;	
+			return true;
 		}
 
 		return false;
@@ -779,14 +1114,28 @@ class lessc {
 	/**
 	 * Consume an assignment operator
 	 * Can optionally take a name that will be set to the current property name
+	 *
+	 * @param null $name
+	 *
+	 * @return bool
 	 */
-	function assign($name = null) {
-		if ($name) $this->currentProperty = $name;
+	public function assign($name = null)
+	{
+//		if ($name) {
+//			$this->currentProperty = $name;
+//		}
 		return $this->literal(':') || $this->literal('=');
 	}
 
-	// consume a keyword
-	function keyword(&$word) {
+	/**
+	 * Consume a keyword
+	 *
+	 * @param $word
+	 *
+	 * @return bool
+	 */
+	public function keyword(&$word)
+	{
 		if ($this->match('([\w_\-\*!"][\w\-_"]*)', $m)) {
 			$word = $m[1];
 			return true;
@@ -794,10 +1143,16 @@ class lessc {
 		return false;
 	}
 
-	// consume an end of statement delimiter
-	function end() {
-		if ($this->literal(';'))
+	/**
+	 * Consume an end of statement delimiter
+	 *
+	 * @return bool
+	 */
+	public function end()
+	{
+		if ($this->literal(';')) {
 			return true;
+		}
 		elseif ($this->count == strlen($this->buffer) || $this->buffer{$this->count} == '}') {
 			// if there is end of file or a closing block next then we don't need a ;
 			return true;
@@ -805,15 +1160,24 @@ class lessc {
 		return false;
 	}
 
-	function compressList($items, $delim) {
-		if (count($items) == 1) return $items[0];	
-		else return array('list', $delim, $items);
+	/**
+	 * @param $items
+	 * @param $delim
+	 *
+	 * @return array
+	 */
+	public function compressList($items, $delim)
+	{
+		if (count($items) == 1) {
+			return $items[0];
+		}
+		else {
+			return array('list', $delim, $items);
+		}
 	}
 
 	/**
-	 * Recursively compiles a block. 
-	 * @param $block the block
-	 * @param $parentTags the tags of the block that contained this one
+	 * Recursively compiles a block.
 	 *
 	 * A block is analogous to a CSS block in most cases. A single less document
 	 * is encapsulated in a block when parsed, but it does not have parent tags
@@ -831,8 +1195,13 @@ class lessc {
 	 *
 	 * See lessc::compileProp()
 	 *
+	 * @param stdClass $block the block
+	 * @param null $parent_tags tags of the block that contained this one
+	 *
+	 * @return string
 	 */
-	function compileBlock($block, $parent_tags = null) {
+	public function compileBlock($block, $parent_tags = null)
+	{
 		$isRoot = $parent_tags == null && $block->tags == null;
 
 		$indent = str_repeat($this->indentChar, $this->indentLevel);
@@ -855,8 +1224,7 @@ class lessc {
 
 		$this->pop();
 
-		$nl = $isRoot ? "\n".$indent :
-			"\n".$indent.$this->indentChar;
+		$nl = $isRoot ? "\n" . $indent : "\n" . $indent . $this->indentChar;
 
 		ob_start();
 
@@ -864,64 +1232,92 @@ class lessc {
 			$this->indentLevel--;
 			if (isset($block->media)) {
 				list($media_types, $media_rest) = $block->media;
-				echo "@media ".join(', ', $media_types).
-					(!empty($media_rest) ? " $media_rest" : '' );
+				echo "@media " . join(', ', $media_types) . (!empty($media_rest) ? " $media_rest" : '');
 			} elseif (isset($block->keyframes)) {
-				echo $block->tags[0]." ".
-					$this->compileValue($this->reduce($block->keyframes));
+				echo $block->tags[0] . " " . $this->compileValue($this->reduce($block->keyframes));
 			} else {
 				list($name) = $block->tags;
-				echo $indent.$name;
+				echo $indent . $name;
 			}
 
-			echo ' {'.(count($lines) > 0 ? $nl : "\n");
+			echo ' {' . (count($lines) > 0 ? $nl : "\n");
 		}
 
 		// dump it
 		if (count($lines) > 0) {
 			if (!$special_block && !$isRoot) {
-				echo $indent.implode(", ", $tags);
-				if (count($lines) > 1) echo " {".$nl;
-				else echo " { ";
+				echo $indent . implode(", ", $tags);
+				if (count($lines) > 1) {
+					echo " {" . $nl;
+				} else {
+					echo " { ";
+				}
 			}
 
 			echo implode($nl, $lines);
 
 			if (!$special_block && !$isRoot) {
-				if (count($lines) > 1) echo "\n".$indent."}\n";
-				else echo " }\n";
-			} else echo "\n";
+				if (count($lines) > 1) {
+					echo "\n" . $indent . "}\n";
+				} else {
+					echo " }\n";
+				}
+			} else {
+				echo "\n";
+			}
 		}
 
-		foreach ($blocks as $b) echo $b;
+		foreach ($blocks as $b) {
+			echo $b;
+		}
 
 		if ($special_block) {
-			echo $indent."}\n";
+			echo $indent . "}\n";
 		}
 
 		return ob_get_clean();
 	}
 
 
-	// find the fully qualified tags for a block and its parent's tags
-	function multiplyTags($parents, $current) {
-		if ($parents == null) return $current;
+	/**
+	 * Find the fully qualified tags for a block and its parent's tags
+	 *
+	 * @param $parents
+	 * @param $current
+	 *
+	 * @return array
+	 */
+	public function multiplyTags($parents, $current)
+	{
+		if ($parents == null) {
+			return $current;
+		}
 
 		$tags = array();
 		foreach ($parents as $ptag) {
 			foreach ($current as $tag) {
-				$tags[] = trim($ptag.
-					($tag{0} == $this->selfSelector || $tag{0} == ':'
-						? ltrim($tag, $this->selfSelector) : ' '.$tag));
+				$tags[] = trim($ptag .
+									   ($tag[0] == $this->selfSelector || $tag[0] == ':'
+											   ? ltrim($tag, $this->selfSelector) : ' ' . $tag));
 			}
 		}
 
 		return $tags;
 	}
 
-	// attempt to find block pointed at by path within search_in or its parent
-	function findBlock($search_in, $path) {
-		if ($search_in == null) return null;
+	/**
+	 * Attempt to find block pointed at by path within search_in or its parent
+	 *
+	 * @param stdClass $search_in
+	 * @param $path
+	 *
+	 * @return null|stdClass
+	 */
+	public function findBlock($search_in, $path)
+	{
+		if ($search_in == null) {
+			return null;
+		}
 		$name = $path[0];
 
 		if (isset($search_in->children[$name])) {
@@ -936,94 +1332,114 @@ class lessc {
 		}
 	}
 
-	// sets all argument names in $args to either the default value
-	// or the one passed in through $values
-	function zipSetArgs($args, $values) {
+	/**
+	 * Sets all argument names in $args to either the default value
+	 * or the one passed in through $values
+	 *
+	 * @param $args
+	 * @param $values
+	 */
+	public function zipSetArgs($args, $values)
+	{
 		$i = 0;
 		foreach ($args as $a) {
 			if ($i < count($values) && !is_null($values[$i])) {
 				$value = $values[$i];
 			} elseif (isset($a[1])) {
 				$value = $a[1];
-			} else $value = null;
+			} else {
+				$value = null;
+			}
 
-			$this->set($this->vPrefix.$a[0], $this->reduce($value));
+			$this->set($this->vPrefix . $a[0], $this->reduce($value));
 			$i++;
 		}
 	}
 
-	// compile a prop and update $lines or $blocks appropriately
-	function compileProp($prop, $block, $tags, &$_lines, &$_blocks) {
+	/**
+	 * Compile a prop and update $lines or $blocks appropriately
+	 *
+	 * @throws Exception
+	 *
+	 * @param $prop
+	 * @param $block
+	 * @param $tags
+	 * @param $_lines
+	 * @param $_blocks
+	 */
+	public function compileProp($prop, $block, $tags, &$_lines, &$_blocks)
+	{
 		switch ($prop[0]) {
-		case 'assign':
-			list(, $name, $value) = $prop;
-			if ($name[0] == $this->vPrefix) {
-				$this->set($name, $this->reduce($value));
-			} else {
-				$_lines[] = "$name:".
-					$this->compileValue($this->reduce($value)).";";
-			}
-			break;
-		case 'block':
-			list(, $child) = $prop;
-			$_blocks[] = $this->compileBlock($child, $tags);
-			break;
-		case 'mixin':
-			list(, $path, $args) = $prop;
+			case 'assign':
+				list(, $name, $value) = $prop;
+				if ($name[0] == $this->vPrefix) {
+					$this->set($name, $this->reduce($value));
+				} else {
+					$_lines[] = "$name:" . $this->compileValue($this->reduce($value)) . ";";
+				}
+				break;
+			case 'block':
+				list(, $child) = $prop;
+				$_blocks[] = $this->compileBlock($child, $tags);
+				break;
+			case 'mixin':
+				list(, $path, $args) = $prop;
 
-			$mixin = $this->findBlock($block, $path);
-			if (is_null($mixin)) {
-				// echo "failed to find block: ".implode(" > ", $path)."\n";
-				break; // throw error here??
-			}
+				$mixin = $this->findBlock($block, $path);
+				if ($mixin === null) {
+					// echo "failed to find block: ".implode(" > ", $path)."\n";
+					break; // throw error here??
+				}
 
-			$have_args = false;
-			if (isset($mixin->args)) {
-				$have_args = true;
-				$this->pushEnv();
-				$this->zipSetArgs($mixin->args, $args);
-			}
+				$have_args = false;
+				if (isset($mixin->args)) {
+					$have_args = true;
+					$this->pushEnv();
+					$this->zipSetArgs($mixin->args, $args);
+				}
 
-			list($name) = $mixin->tags;
-			if ($name == "div") {
-				print_r($mixin->props);
-			}
+				list($name) = $mixin->tags;
+				if ($name == 'div') {
+					print_r($mixin->props);
+				}
 
-			$old_parent = $mixin->parent;
-			$mixin->parent = $block;
+				$old_parent = $mixin->parent;
+				$mixin->parent = $block;
 
-			foreach ($mixin->props as $sub_prop) {
-				$this->compileProp($sub_prop, $mixin, $tags, $_lines, $_blocks);
-			}
+				foreach ($mixin->props as $sub_prop) {
+					$this->compileProp($sub_prop, $mixin, $tags, $_lines, $_blocks);
+				}
 
-			$mixin->parent = $old_parent;
+				$mixin->parent = $old_parent;
 
-			if ($have_args) $this->pop();
+				if ($have_args) {
+					$this->pop();
+				}
 
-			break;
-		case 'raw':
-			$_lines[] = $prop[1];
-			break;
-		case 'import':
-			list(, $path) = $prop;
-			$this->addParsedFile($path);
-			$root = $this->createChild($path)->parseTree();
+				break;
+			case 'raw':
+				$_lines[] = $prop[1];
+				break;
+			case 'import':
+				list(, $path) = $prop;
+				$this->addParsedFile($path);
+				$root = $this->createChild($path)->parseTree();
 
-			$root->parent = $block;
-			foreach ($root->props as $sub_prop) {
-				$this->compileProp($sub_prop, $root, $tags, $_lines, $_blocks);
-			}
+				$root->parent = $block;
+				foreach ($root->props as $sub_prop) {
+					$this->compileProp($sub_prop, $root, $tags, $_lines, $_blocks);
+				}
 
-			// inject imported blocks into this block, local will overwrite import
-			$block->children = array_merge($root->children, $block->children);
-			break;
-		case 'charset':
-			list(, $value) = $prop;
-			$_lines[] = '@charset '.$this->compileValue($this->reduce($value)).';';
-			break;
-		default:
-			echo "unknown op: {$prop[0]}\n";
-			throw new exception();
+				// inject imported blocks into this block, local will overwrite import
+				$block->children = array_merge($root->children, $block->children);
+				break;
+			case 'charset':
+				list(, $value) = $prop;
+				$_lines[] = '@charset ' . $this->compileValue($this->reduce($value)) . ';';
+				break;
+			default:
+				echo "unknown op: {$prop[0]}\n";
+				throw new Exception();
 		}
 	}
 
@@ -1034,122 +1450,173 @@ class lessc {
 	 * Values in lessphp are typed by being wrapped in arrays, their format is
 	 * typically:
 	 *
-	 *     array(type, contents [, additional_contents]*)
+	 *	 array(type, contents [, additional_contents]*)
 	 *
 	 * Will not work on non reduced values (expressions, variables, etc)
+	 *
+	 * @param array $value
+	 *
+	 * @return string
 	 */
-	function compileValue($value) {
+	public function compileValue($value)
+	{
 		switch ($value[0]) {
-		case 'list':
-			// [1] - delimiter
-			// [2] - array of values
-			return implode($value[1], array_map(array($this, 'compileValue'), $value[2]));
-		case 'keyword':
-			// [1] - the keyword 
-		case 'number':
-			// [1] - the number 
-			return $value[1];
-		case 'string':
-			// [1] - contents of string (includes quotes)
-			
-			// search for inline variables to replace
-			$replace = array();
-			if (preg_match_all('/{('.$this->preg_quote($this->vPrefix).'[\w-_][0-9\w-_]*?)}/', $value[1], $m)) {
-				foreach ($m[1] as $name) {
-					if (!isset($replace[$name]))
-						$replace[$name] = $this->compileValue($this->reduce(array('variable', $name)));
+			case 'list':
+				// [1] - delimiter
+				// [2] - array of values
+				$val = implode($value[1], array_map(array($this, 'compileValue'), $value[2]));
+				// Fix for the "5 px"
+				$val = preg_replace('~(?<=\d)(?:' . preg_quote($value[1], '~') . "|[ \t]+)(" . self::$unitsRegexp .')\b~Xi', '$1', $val);
+				return $val;
+			case 'keyword':
+				// [1] - the keyword
+			case 'number':
+				// [1] - the number
+				return $value[1];
+			case 'string':
+				// [1] - contents of string (includes quotes)
+				// search for inline variables to replace
+				$replace = array();
+				if (preg_match_all('/{(' . $this->preg_quote($this->vPrefix) . '[\w-_][0-9\w-_]*?)}/', $value[1], $m)) {
+					foreach ($m[1] as $name) {
+						if (!isset($replace[$name])) {
+							$replace[$name] = $this->compileValue($this->reduce(array('variable', $name)));
+						}
+					}
 				}
-			}
-			foreach ($replace as $var=>$val) {
-				// strip quotes
-				if (preg_match('/^(["\']).*?(\1)$/', $val)) {
-					$val = substr($val, 1, -1);
+				foreach ($replace as $var => $val) {
+					// strip quotes
+					if (preg_match('/^(["\']).*?(\1)$/', $val)) {
+						$val = substr($val, 1, -1);
+					}
+					$value[1] = str_replace('{' . $var . '}', $val, $value[1]);
 				}
-				$value[1] = str_replace('{'.$var.'}', $val, $value[1]);
-			}
+				return $value[1];
+			case 'color':
+				// [1] - red component (either number for a %)
+				// [2] - green component
+				// [3] - blue component
+				// [4] - optional alpha component
 
-			return $value[1];
-		case 'color':
-			// [1] - red component (either number for a %)
-			// [2] - green component
-			// [3] - blue component
-			// [4] - optional alpha component
-			if (count($value) == 5) { // rgba
-				return 'rgba('.$value[1].','.$value[2].','.$value[3].','.$value[4].')';
-			}
-			return sprintf("#%02x%02x%02x", $value[1], $value[2], $value[3]);
-		case 'function':
-			// [1] - function name
-			// [2] - some value representing arguments
+				// rgba
+				if (count($value) == 5) {
+					return 'rgba(' . $value[1] . ',' . $value[2] . ',' . $value[3] . ',' . $value[4] . ')';
+				}
 
-			// see if function evaluates to something else
-			$value = $this->reduce($value);
-			if ($value[0] == 'function') {
-				return $value[1].'('.$this->compileValue($value[2]).')';
-			}
-			else return $this->compileValue($value);
-		default: // assumed to be unit	
-			return $value[1].$value[0];
+				// Hex color
+				$c = sprintf('%02x%02x%02x', $value[1], $value[2], $value[3]);
+				// Color minification
+				if (($c[0] === $c[1]) && ($c[2] === $c[3]) && ($c[4] === $c[5])) {
+					$c = $c[0] . $c[2] . $c[4];
+				}
+				$c = ($c === 'f00') ? 'red' : '#' . $c;
+
+				return $c;
+			case 'function':
+				// [1] - function name
+				// [2] - some value representing arguments
+
+				// see if function evaluates to something else
+				$value = $this->reduce($value);
+				if ($value[0] == 'function') {
+					return $value[1] . '(' . $this->compileValue($value[2]) . ')';
+				} else {
+					return $this->compileValue($value);
+				}
+			default:
+				// assumed to be unit
+				return $value[1] . $value[0];
 		}
 	}
 
-	function lib_rgbahex($color) {
-		if ($color[0] != 'color')
-			throw new exception("color expected for rgbahex");
+	public function lib_rgbahex($color)
+	{
+		if ($color[0] != 'color') {
+			throw new Exception("color expected for rgbahex");
+		}
 
 		return sprintf("#%02x%02x%02x%02x",
-			isset($color[4]) ? $color[4]*255 : 0,
-			$color[1],$color[2], $color[3]);
+					   isset($color[4]) ? $color[4] * 255 : 0,
+					   $color[1], $color[2], $color[3]);
 	}
 
-	function lib_quote($arg) {
-		return '"'.$this->compileValue($arg).'"';
+	public function lib_quote($arg)
+	{
+		return '"' . $this->compileValue($arg) . '"';
 	}
 
-	function lib_unquote($arg) {
+	public function lib_unquote($arg)
+	{
 		$out = $this->compileValue($arg);
-		if ($this->quoted($out)) $out = substr($out, 1, -1);
+		if ($this->quoted($out)) {
+			$out = substr($out, 1, -1);
+		}
 		return $out;
 	}
 
-	// alias for unquote
-	function lib_e($arg) {
+	/**
+	 * Alias for unquote
+	 *
+	 * @param $arg
+	 * @return string
+	 */
+	public function lib_e($arg)
+	{
 		return $this->lib_unquote($arg);
 	}
 
-	function lib_floor($arg) {
+	public function lib_floor($arg)
+	{
 		return floor($arg[1]);
 	}
 
-	function lib_round($arg) {
+	public function lib_round($arg)
+	{
 		return round($arg[1]);
 	}
 
-	// is a string surrounded in quotes? returns the quoting char if true
-	function quoted($s) {
-		if (preg_match('/^("|\').*?\1$/', $s, $m))
+	/**
+	 * Is a string surrounded in quotes? returns the quoting char if true
+	 *
+	 * @param $s
+	 *
+	 * @return bool
+	 */
+	public function quoted($s)
+	{
+		if (preg_match('/^("|\').*?\1$/', $s, $m)) {
 			return $m[1];
-		else return false;
+		}
+		else {
+			return false;
+		}
 	}
 
 	/**
 	 * Helper function to get argurments for color functions
 	 * accepts invalid input, non colors interpreted to black
+	 *
+	 * @param $args
+	 *
+	 * @return array
 	 */
-	function colorArgs($args) {
+	public function colorArgs($args)
+	{
 		if ($args[0] != 'list' || count($args[2]) < 2) {
 			return array(array('color', 0, 0, 0));
 		}
 		list($color, $delta) = $args[2];
-		if ($color[0] != 'color')
+		if ($color[0] != 'color') {
 			$color = array('color', 0, 0, 0);
+		}
 
 		$delta = floatval($delta[1]);
 
 		return array($color, $delta);
 	}
 
-	function lib_darken($args) {
+	public function lib_darken($args)
+	{
 		list($color, $delta) = $this->colorArgs($args);
 
 		$hsl = $this->toHSL($color);
@@ -1157,7 +1624,8 @@ class lessc {
 		return $this->toRGB($hsl);
 	}
 
-	function lib_lighten($args) {
+	public function lib_lighten($args)
+	{
 		list($color, $delta) = $this->colorArgs($args);
 
 		$hsl = $this->toHSL($color);
@@ -1165,7 +1633,8 @@ class lessc {
 		return $this->toRGB($hsl);
 	}
 
-	function lib_saturate($args) {
+	public function lib_saturate($args)
+	{
 		list($color, $delta) = $this->colorArgs($args);
 
 		$hsl = $this->toHSL($color);
@@ -1173,7 +1642,8 @@ class lessc {
 		return $this->toRGB($hsl);
 	}
 
-	function lib_desaturate($args) {
+	public function lib_desaturate($args)
+	{
 		list($color, $delta) = $this->colorArgs($args);
 
 		$hsl = $this->toHSL($color);
@@ -1181,7 +1651,8 @@ class lessc {
 		return $this->toRGB($hsl);
 	}
 
-	function lib_spin($args) {
+	public function lib_spin($args)
+	{
 		list($color, $delta) = $this->colorArgs($args);
 
 		$hsl = $this->toHSL($color);
@@ -1189,38 +1660,52 @@ class lessc {
 		return $this->toRGB($hsl);
 	}
 
-	function lib_fadeout($args) {
+	public function lib_fadeout($args)
+	{
 		list($color, $delta) = $this->colorArgs($args);
-		$color[4] = $this->clamp((isset($color[4]) ? $color[4] : 1) - $delta/100);
+		$color[4] = $this->clamp((isset($color[4]) ? $color[4] : 1) - $delta / 100);
 		return $color;
 	}
 
-	function lib_fadein($args) {
+	public function lib_fadein($args)
+	{
 		list($color, $delta) = $this->colorArgs($args);
-		$color[4] = $this->clamp((isset($color[4]) ? $color[4] : 1) + $delta/100);
+		$color[4] = $this->clamp((isset($color[4]) ? $color[4] : 1) + $delta / 100);
 		return $color;
 	}
 
-	function lib_hue($color) {
-		if ($color[0] != 'color') return 0;
+	public function lib_hue($color)
+	{
+		if ($color[0] != 'color') {
+			return 0;
+		}
 		$hsl = $this->toHSL($color);
 		return round($hsl[1]);
 	}
 
-	function lib_saturation($color) {
-		if ($color[0] != 'color') return 0;
+	public function lib_saturation($color)
+	{
+		if ($color[0] != 'color') {
+			return 0;
+		}
 		$hsl = $this->toHSL($color);
 		return round($hsl[2]);
 	}
 
-	function lib_lightness($color) {
-		if ($color[0] != 'color') return 0;
+	public function lib_lightness($color)
+	{
+		if ($color[0] != 'color') {
+			return 0;
+		}
 		$hsl = $this->toHSL($color);
 		return round($hsl[3]);
 	}
 
-	function toHSL($color) {
-		if ($color[0] == 'hsl') return $color;
+	public function toHSL($color)
+	{
+		if ($color[0] == 'hsl') {
+			return $color;
+		}
 
 		$r = $color[1] / 255;
 		$g = $color[2] / 255;
@@ -1233,34 +1718,57 @@ class lessc {
 		if ($min == $max) {
 			$S = $H = 0;
 		} else {
-			if ($L < 0.5)
-				$S = ($max - $min)/($max + $min);
+			if ($L < 0.5) {
+				$S = ($max - $min) / ($max + $min);
+			}
 			else
-				$S = ($max - $min)/(2.0 - $max - $min);
+			{
+				$S = ($max - $min) / (2.0 - $max - $min);
+			}
 
-			if ($r == $max) $H = ($g - $b)/($max - $min);
-			elseif ($g == $max) $H = 2.0 + ($b - $r)/($max - $min);
-			elseif ($b == $max) $H = 4.0 + ($r - $g)/($max - $min);
+			if ($r == $max) {
+				$H = ($g - $b) / ($max - $min);
+			}
+			elseif ($g == $max) {
+				$H = 2.0 + ($b - $r) / ($max - $min);
+			}
+			elseif ($b == $max) {
+				$H = 4.0 + ($r - $g) / ($max - $min);
+			}
 
 		}
 
-		$out = array('hsl',
-			($H < 0 ? $H + 6 : $H)*60,
-			$S*100,
-			$L*100,
+		$out = array(
+			'hsl',
+			($H < 0 ? $H + 6 : $H) * 60,
+			$S * 100,
+			$L * 100,
 		);
 
-		if (count($color) > 4) $out[] = $color[4]; // copy alpha
+		if (count($color) > 4) {
+			$out[] = $color[4];
+		} // copy alpha
 		return $out;
 	}
 
-	function toRGB_helper($comp, $temp1, $temp2) {
-		if ($comp < 0) $comp += 1.0;
-		elseif ($comp > 1) $comp -= 1.0;
+	public function toRGB_helper($comp, $temp1, $temp2)
+	{
+		if ($comp < 0) {
+			$comp += 1.0;
+		}
+		elseif ($comp > 1) {
+			$comp -= 1.0;
+		}
 
-		if (6 * $comp < 1) return $temp1 + ($temp2 - $temp1) * 6 * $comp;
-		if (2 * $comp < 1) return $temp2;
-		if (3 * $comp < 2) return $temp1 + ($temp2 - $temp1)*((2/3) - $comp) * 6;
+		if (6 * $comp < 1) {
+			return $temp1 + ($temp2 - $temp1) * 6 * $comp;
+		}
+		if (2 * $comp < 1) {
+			return $temp2;
+		}
+		if (3 * $comp < 2) {
+			return $temp1 + ($temp2 - $temp1) * ((2 / 3) - $comp) * 6;
+		}
 
 		return $temp1;
 	}
@@ -1268,9 +1776,16 @@ class lessc {
 	/**
 	 * Converts an hsl array into a color value in rgb.
 	 * Expects H to be in range of 0 to 360, S and L in 0 to 100
+	 *
+	 * @param $color
+	 *
+	 * @return array
 	 */
-	function toRGB($color) {
-		if ($color == 'color') return $color;
+	public function toRGB($color)
+	{
+		if ($color == 'color') {
+			return $color;
+		}
 
 		$H = $color[1] / 360;
 		$S = $color[2] / 100;
@@ -1280,32 +1795,42 @@ class lessc {
 			$r = $g = $b = $L;
 		} else {
 			$temp2 = $L < 0.5 ?
-				$L*(1.0 + $S) :
-				$L + $S - $L * $S;
+					$L * (1.0 + $S) :
+					$L + $S - $L * $S;
 
 			$temp1 = 2.0 * $L - $temp2;
 
-			$r = $this->toRGB_helper($H + 1/3, $temp1, $temp2);
+			$r = $this->toRGB_helper($H + 1 / 3, $temp1, $temp2);
 			$g = $this->toRGB_helper($H, $temp1, $temp2);
-			$b = $this->toRGB_helper($H - 1/3, $temp1, $temp2);
+			$b = $this->toRGB_helper($H - 1 / 3, $temp1, $temp2);
 		}
 
-		$out = array('color', round($r*255), round($g*255), round($b*255));
-		if (count($color) > 4) $out[] = $color[4]; // copy alpha
+		$out = array('color', round($r * 255), round($g * 255), round($b * 255));
+		if (count($color) > 4) {
+			$out[] = $color[4];
+		} // copy alpha
 		return $out;
 	}
 
-	function clamp($v, $max = 1, $min = 0) {
+	public function clamp($v, $max = 1, $min = 0)
+	{
 		return min($max, max($min, $v));
 	}
 
 	/**
 	 * Convert the rgb, rgba, hsl color literals of function type
 	 * as returned by the parser into values of color type.
+	 *
+	 * @param $func
+	 *
+	 * @return array|bool
 	 */
-	function funcToColor($func) {
+	public function funcToColor($func)
+	{
 		$fname = $func[1];
-		if ($func[2][0] != 'list') return false; // need a list of arguments
+		if ($func[2][0] != 'list') {
+			return false;
+		} // need a list of arguments
 		$rawComponents = $func[2][2];
 
 		if ($fname == 'hsl' || $fname == 'hsla') {
@@ -1315,33 +1840,53 @@ class lessc {
 				$val = $this->reduce($c);
 				$val = isset($val[1]) ? floatval($val[1]) : 0;
 
-				if ($i == 0) $clamp = 360;
-				elseif ($i < 4) $clamp = 100;
-				else $clamp = 1;
+				if ($i == 0) {
+					$clamp = 360;
+				}
+				elseif ($i < 4) {
+					$clamp = 100;
+				}
+				else {
+					$clamp = 1;
+				}
 
 				$hsl[] = $this->clamp($val, $clamp);
 				$i++;
 			}
 
-			while (count($hsl) < 4) $hsl[] = 0;
+			while (count($hsl) < 4) {
+				$hsl[] = 0;
+			}
 			return $this->toRGB($hsl);
 
 		} elseif ($fname == 'rgb' || $fname == 'rgba') {
 			$components = array();
 			$i = 1;
-			foreach	($rawComponents as $c) {
+			foreach ($rawComponents as $c) {
 				$c = $this->reduce($c);
 				if ($i < 4) {
-					if ($c[0] == '%') $components[] = 255 * ($c[1] / 100);
-					else $components[] = floatval($c[1]); 
+					if ($c[0] == '%') {
+						$components[] = 255 * ($c[1] / 100);
+					}
+					else {
+						$components[] = floatval($c[1]);
+					}
 				} elseif ($i == 4) {
-					if ($c[0] == '%') $components[] = 1.0 * ($c[1] / 100);
-					else $components[] = floatval($c[1]);
-				} else break;
+					if ($c[0] == '%') {
+						$components[] = 1.0 * ($c[1] / 100);
+					}
+					else {
+						$components[] = floatval($c[1]);
+					}
+				} else {
+					break;
+				}
 
 				$i++;
 			}
-			while (count($components) < 3) $components[] = 0;
+			while (count($components) < 3) {
+				$components[] = 0;
+			}
 			array_unshift($components, 'color');
 			return $this->fixColor($components);
 		}
@@ -1349,12 +1894,22 @@ class lessc {
 		return false;
 	}
 
-	// reduce a delayed type to its final value
-	// dereference variables and solve equations
-	function reduce($var, $defaultValue = array('number', 0)) {
+	/**
+	 * Reduce a delayed type to its final value
+	 * dereference variables and solve equations
+	 *
+	 * @param $var
+	 * @param array $defaultValue
+	 *
+	 * @return mixed
+	 */
+	public function reduce($var, $defaultValue = array('number', 0))
+	{
 		while (in_array($var[0], self::$dtypes)) {
 			if ($var[0] == 'list') {
-				foreach ($var[2] as &$value) $value = $this->reduce($value);
+				foreach ($var[2] as &$value) {
+					$value = $this->reduce($value);
+				}
 				break;
 			} elseif ($var[0] == 'expression') {
 				$var = $this->evaluate($var[1], $var[2], $var[3]);
@@ -1365,19 +1920,26 @@ class lessc {
 				$var = array('number', 0);
 			} elseif ($var[0] == 'function') {
 				$color = $this->funcToColor($var);
-				if ($color) $var = $color;
+				if ($color) {
+					$var = $color;
+				}
 				else {
 					list($_, $name, $args) = $var;
-					$f = array($this, 'lib_'.$name);
+					$f = array($this, 'lib_' . $name);
 					if (is_callable($f)) {
-						if ($args[0] == 'list')
+						if ($args[0] == 'list') {
 							$args = $this->compressList($args[2], $args[1]);
+						}
 
 						$var = call_user_func($f, $this->reduce($args));
 
 						// convet to a typed value if the result is a php primitive
-						if (is_numeric($var)) $var = array('number', $var);
-						elseif (!is_array($var)) $var = array('keyword', $var);
+						if (is_numeric($var)) {
+							$var = array('number', $var);
+						}
+						elseif (!is_array($var)) {
+							$var = array('keyword', $var);
+						}
 					} else {
 						// plain function, reduce args
 						$var[2] = $this->reduce($var[2]);
@@ -1387,8 +1949,8 @@ class lessc {
 			} elseif ($var[0] == 'negative') {
 				$value = $this->reduce($var[1]);
 				if (is_numeric($value[1])) {
-					$value[1] = -1*$value[1];
-				} 
+					$value[1] = -1 * $value[1];
+				}
 				$var = $value;
 			}
 		}
@@ -1396,8 +1958,17 @@ class lessc {
 		return $var;
 	}
 
-	// evaluate an expression
-	function evaluate($op, $left, $right) {
+	/**
+	 * Evaluate an expression
+	 *
+	 * @param $op
+	 * @param $left
+	 * @param $right
+	 *
+	 * @return array
+	 */
+	public function evaluate($op, $left, $right)
+	{
 		$left = $this->reduce($left);
 		$right = $this->reduce($right);
 
@@ -1417,109 +1988,154 @@ class lessc {
 		// concatenate strings
 		if ($op == '+' && $left[0] == 'string') {
 			$append = $this->compileValue($right);
-			if ($this->quoted($append)) $append = substr($append, 1, -1);
+			if ($this->quoted($append)) {
+				$append = substr($append, 1, -1);
+			}
 
 			$lhs = $this->compileValue($left);
-			if ($q = $this->quoted($lhs)) $lhs = substr($lhs, 1, -1);
-			if (!$q) $q = '';
+			if ($q = $this->quoted($lhs)) {
+				$lhs = substr($lhs, 1, -1);
+			}
+			if (!$q) {
+				$q = '';
+			}
 
-			return array('string', $q.$lhs.$append.$q);
+			return array('string', $q . $lhs . $append . $q);
 		}
 
 		if ($left[0] == 'keyword' || $right[0] == 'keyword' ||
-			$left[0] == 'string' || $right[0] == 'string')
-		{
+				$left[0] == 'string' || $right[0] == 'string'
+		) {
 			// look for negative op
-			if ($op == '-') $right[1] = '-'.$right[1];
-			return array('keyword', $this->compileValue($left) .' '. $this->compileValue($right));
+			if ($op == '-') {
+				$right[1] = '-' . $right[1];
+			}
+			return array('keyword', $this->compileValue($left) . ' ' . $this->compileValue($right));
 		}
-	
+
 		// default to number operation
 		return $this->op_number_number($op, $left, $right);
 	}
 
-	// make sure a color's components don't go out of bounds
-	function fixColor($c) {
+	/**
+	 * Make sure a color's components don't go out of bounds
+	 *
+	 * @param $c
+	 *
+	 * @return array
+	 */
+	public function fixColor($c)
+	{
 		foreach (range(1, 3) as $i) {
-			if ($c[$i] < 0) $c[$i] = 0;
-			if ($c[$i] > 255) $c[$i] = 255;
+			if ($c[$i] < 0) {
+				$c[$i] = 0;
+			}
+			if ($c[$i] > 255) {
+				$c[$i] = 255;
+			}
 			$c[$i] = floor($c[$i]);
 		}
 
 		return $c;
 	}
 
-	function op_number_color($op, $lft, $rgt) {
+	public function op_number_color($op, $lft, $rgt)
+	{
 		if ($op == '+' || $op = '*') {
 			return $this->op_color_number($op, $rgt, $lft);
 		}
 	}
 
-	function op_color_number($op, $lft, $rgt) {
-		if ($rgt[0] == '%') $rgt[1] /= 100;
+	public function op_color_number($op, $lft, $rgt)
+	{
+		if ($rgt[0] == '%') {
+			$rgt[1] /= 100;
+		}
 
 		return $this->op_color_color($op, $lft,
-			array_fill(1, count($lft) - 1, $rgt[1]));
+									 array_fill(1, count($lft) - 1, $rgt[1]));
 	}
 
-	function op_color_color($op, $left, $right) {
+	public function op_color_color($op, $left, $right)
+	{
 		$out = array('color');
 		$max = count($left) > count($right) ? count($left) : count($right);
 		foreach (range(1, $max - 1) as $i) {
 			$lval = isset($left[$i]) ? $left[$i] : 0;
 			$rval = isset($right[$i]) ? $right[$i] : 0;
 			switch ($op) {
-			case '+':
-				$out[] = $lval + $rval;
-				break;
-			case '-':
-				$out[] = $lval - $rval;
-				break;
-			case '*':
-				$out[] = $lval * $rval;
-				break;
-			case '%':
-				$out[] = $lval % $rval;
-				break;
-			case '/':
-				if ($rval == 0) throw new exception("evaluate error: can't divide by zero");
-				$out[] = $lval / $rval;
-				break;
-			default:
-				throw new exception('evaluate error: color op number failed on op '.$op);
+				case '+':
+					$out[] = $lval + $rval;
+					break;
+				case '-':
+					$out[] = $lval - $rval;
+					break;
+				case '*':
+					$out[] = $lval * $rval;
+					break;
+				case '%':
+					$out[] = $lval % $rval;
+					break;
+				case '/':
+					if ($rval == 0) {
+						throw new Exception("evaluate error: can't divide by zero");
+					}
+					$out[] = $lval / $rval;
+					break;
+				default:
+					throw new Exception('evaluate error: color op number failed on op ' . $op);
 			}
 		}
 		return $this->fixColor($out);
 	}
 
-	// operator on two numbers
-	function op_number_number($op, $left, $right) {
-		if ($right[0] == '%') $right[1] /= 100;
+	/**
+	 * Operator on two numbers
+	 *
+	 * @throws Exception
+	 *
+	 * @param $op
+	 * @param $left
+	 * @param $right
+	 *
+	 * @return array
+	 */
+	public function op_number_number($op, $left, $right)
+	{
+		if ($right[0] == '%') {
+			$right[1] /= 100;
+		}
 
 		// figure out type
-		if ($right[0] == 'number' || $right[0] == '%') $type = $left[0];
-		else $type = $right[0];
+		if ($right[0] == 'number' || $right[0] == '%') {
+			$type = $left[0];
+		}
+		else {
+			$type = $right[0];
+		}
 
 		$value = 0;
 		switch ($op) {
-		case '+':
-			$value = $left[1] + $right[1];
-			break;	
-		case '*':
-			$value = $left[1] * $right[1];
-			break;	
-		case '-':
-			$value = $left[1] - $right[1];
-			break;	
-		case '%':
-			$value = $left[1] % $right[1];
-			break;	
-		case '/':
-			if ($right[1] == 0) throw new exception('parse error: divide by zero');
-			$value = $left[1] / $right[1];
-			break;
-		default:
-			throw new exception('parse error: unknown number operator: '.$op);	
+			case '+':
+				$value = $left[1] + $right[1];
+				break;
+			case '*':
+				$value = $left[1] * $right[1];
+				break;
+			case '-':
+				$value = $left[1] - $right[1];
+				break;
+			case '%':
+				$value = $left[1] % $right[1];
+				break;
+			case '/':
+				if ($right[1] == 0) {
+					throw new Exception('parse error: divide by zero');
+				}
+				$value = $left[1] / $right[1];
+				break;
+			default:
+				throw new Exception('parse error: unknown number operator: ' . $op);
 		}
 
 		return array($type, $value);
@@ -1528,9 +2144,16 @@ class lessc {
 
 	/* environment functions */
 
-	// push a new block on the stack, used for parsing
-	function pushBlock($tags) {
-		$b = new stdclass;
+	/**
+	 * Push a new block on the stack, used for parsing
+	 *
+	 * @param $tags
+	 *
+	 * @return stdClass
+	 */
+	public function pushBlock($tags)
+	{
+		$b = new stdClass;
 		$b->parent = $this->env;
 
 		$b->tags = $tags;
@@ -1540,17 +2163,29 @@ class lessc {
 		$this->env = $b;
 		return $b;
 	}
-	
-	// push a block that doesn't multiply tags
-	function pushSpecialBlock($name) {
+
+	/**
+	 * Push a block that doesn't multiply tags
+	 *
+	 * @param $name
+	 *
+	 * @return stdClass
+	 */
+	public function pushSpecialBlock($name)
+	{
 		$b = $this->pushBlock(array($name));
 		$b->no_multiply = true;
 		return $b;
 	}
 
-	// used for compiliation variable state
-	function pushEnv() {
-		$e = new stdclass;
+	/**
+	 * Used for compiliation variable state
+	 *
+	 * @return stdClass
+	 */
+	public function pushEnv()
+	{
+		$e = new stdClass;
 		$e->parent = $this->env;
 
 		$this->store = array();
@@ -1559,71 +2194,134 @@ class lessc {
 		return $e;
 	}
 
-	// pop something off the stack
-	function pop() {
+	/**
+	 * Pop something off the stack
+	 *
+	 * @return null|stdClass
+	 */
+	public function pop()
+	{
 		$old = $this->env;
 		$this->env = $this->env->parent;
 		return $old;
 	}
 
-	// set something in the current env
-	function set($name, $value) {
+	/**
+	 * Set something in the current env
+	 *
+	 * @param $name
+	 * @param $value
+	 *
+	 * @return void
+	 */
+	public function set($name, $value)
+	{
 		$this->env->store[$name] = $value;
 	}
 
-	// append an property
-	function append($prop) {
+	/**
+	 * Append an property
+	 *
+	 * @param array $prop array(property => value)
+	 */
+	public function append($prop)
+	{
 		$this->env->props[] = $prop;
 	}
 
-	// get the highest occurrence entry for a name
-	function get($name) {
+	/**
+	 * Get the highest occurrence entry for a name
+	 *
+	 * @param $name
+	 *
+	 * @return null
+	 */
+	public function get($name)
+	{
 		$current = $this->env;
 		while ($current) {
-			if (isset($current->store[$name]))
+			if (isset($current->store[$name])) {
 				return $current->store[$name];
-			else
+			} else {
 				$current = $current->parent;
+			}
 		}
-
 		return null;
 	}
-	
+
 	/* raw parsing functions */
 
-	function literal($what, $eatWhitespace = true) {
+	/**
+	 * @param $what
+	 * @param bool $eatWhitespace
+	 *
+	 * @return bool
+	 */
+	public function literal($what, $eatWhitespace = true)
+	{
 		// this is here mainly prevent notice from { } string accessor 
-		if ($this->count >= strlen($this->buffer)) return false;
+		if ($this->count >= strlen($this->buffer)) {
+			return false;
+		}
 
 		// shortcut on single letter
-		if (!$eatWhitespace and strlen($what) == 1) {
-			if ($this->buffer{$this->count} == $what) {
+		if (!$eatWhitespace && strlen($what) == 1) {
+			if ($this->buffer[ $this->count ] == $what) {
 				$this->count++;
 				return true;
+			} else {
+				return false;
 			}
-			else return false;
 		}
 
 		return $this->match($this->preg_quote($what), $m, $eatWhitespace);
 	}
 
-	function preg_quote($what) {
+	/**
+	 * @param $what
+	 *
+	 * @return string
+	 */
+	public function preg_quote($what)
+	{
 		return preg_quote($what, '/');
 	}
 
-	// advance counter to next occurrence of $what
-	// $until - don't include $what in advance
-	function to($what, &$out, $until = false, $allowNewline = false) {
+	/**
+	 * Advance counter to next occurrence of $what
+	 *
+	 * @param $what
+	 * @param $out
+	 * @param bool $until don't include $what in advance
+	 * @param bool $allowNewline
+	 *
+	 * @return bool
+	 */
+	public function to($what, &$out, $until = false, $allowNewline = false)
+	{
 		$validChars = $allowNewline ? "[^\n]" : '.';
-		if (!$this->match('('.$validChars.'*?)'.$this->preg_quote($what), $m, !$until)) return false;
-		if ($until) $this->count -= strlen($what); // give back $what
+		if (!$this->match('(' . $validChars . '*?)' . $this->preg_quote($what), $m, !$until)) {
+			return false;
+		}
+		if ($until) {
+			$this->count -= strlen($what);
+		} // give back $what
 		$out = $m[1];
 		return true;
 	}
-	
-	// try to match something on head of buffer
-	function match($regex, &$out, $eatWhitespace = true) {
-		$r = '/'.$regex.($eatWhitespace ? '\s*' : '').'/Ais';
+
+	/**
+	 * Try to match something on head of buffer
+	 *
+	 * @param $regex
+	 * @param $out
+	 * @param bool $eatWhitespace
+	 *
+	 * @return bool
+	 */
+	public function match($regex, &$out, $eatWhitespace = true)
+	{
+		$r = '/' . $regex . ($eatWhitespace ? '\s*' : '') . '/Ais';
 		if (preg_match($r, $this->buffer, $out, null, $this->count)) {
 			$this->count += strlen($out[0]);
 			return true;
@@ -1631,25 +2329,47 @@ class lessc {
 		return false;
 	}
 
-	// match something without consuming it
-	function peek($regex, &$out = null) {
-		$r = '/'.$regex.'/Ais';
-		$result =  preg_match($r, $this->buffer, $out, null, $this->count);
-		
+	/**
+	 * Match something without consuming it
+	 *
+	 * @param $regex
+	 * @param null $out
+	 *
+	 * @return int
+	 */
+	public function peek($regex, &$out = null)
+	{
+		$r = '/' . $regex . '/Ais';
+		$result = preg_match($r, $this->buffer, $out, null, $this->count);
+
 		return $result;
 	}
 
-	// seek to a spot in the buffer or return where we are on no argument
-	function seek($where = null) {
-		if ($where === null) return $this->count;
-		else $this->count = $where;
+	/**
+	 * Seek to a spot in the buffer or return where we are on no argument
+	 *
+	 * @param null $where
+	 *
+	 * @return bool
+	 */
+	public function seek($where = null)
+	{
+		if ($where === null) {
+			return $this->count;
+		}
+		else {
+			$this->count = $where;
+		}
 		return true;
 	}
 
 	/**
 	 * Initialize state for a fresh parse
+	 *
+	 * @param $buff
 	 */
-	protected function prepareParser($buff) {
+	protected function prepareParser($buff)
+	{
 		$this->env = null;
 		$this->expandStack = array();
 		$this->indentLevel = 0;
@@ -1657,17 +2377,25 @@ class lessc {
 		$this->line = 1;
 
 		$this->buffer = $this->removeComments($buff);
-		$this->pushBlock(null); // set up global scope
+		// Set up global scope
+		$this->pushBlock(null);
 
-		// trim whitespace on head
+		// Trim whitespace on head
 		if (preg_match('/^\s+/', $this->buffer, $m)) {
-			$this->line  += substr_count($m[0], "\n");
+			$this->line += substr_count($m[0], "\n");
 			$this->buffer = ltrim($this->buffer);
 		}
 	}
 
-	// create a child parser (for compiling an import)
-	protected function createChild($fname) {
+	/**
+	 * Create a child parser (for compiling an import)
+	 *
+	 * @param $fname
+	 *
+	 * @return lessc
+	 */
+	protected function createChild($fname)
+	{
 		$less = new lessc($fname);
 		$less->importDir = $this->importDir;
 		$less->indentChar = $this->indentChar;
@@ -1675,29 +2403,23 @@ class lessc {
 		return $less;
 	}
 
-	protected function parseTree($str = null) {
-		$this->prepareParser(is_null($str) ? $this->buffer : $str);
-		while (false !== $this->parseChunk());
-
-		if ($this->count != strlen($this->buffer))
-			$this->throwParseError();
-
-		if (!is_null($this->env->parent))
-			throw new exception('parse error: unclosed block');
-
-		$root = $this->env;
-		$this->env = null;
-		return $root;
-	}
-
-	// inject array of unparsed strings into environment as variables
-	protected function injectVariables($args) {
+	/**
+	 * Inject array of unparsed strings into environment as variables
+	 *
+	 * @throws Exception
+	 *
+	 * @param $args
+	 */
+	protected function injectVariables($args)
+	{
 		$this->pushEnv();
 		$parser = new lessc();
 		foreach ($args as $name => $str_value) {
-			if ($name{0} != '@') $name = '@'.$name;
+			if ($name[0] != '@') {
+				$name = '@' . $name;
+			}
 			$parser->count = 0;
-			$parser->buffer = (string)$str_value;
+			$parser->buffer = (string) $str_value;
 			if (!$parser->propertyValue($value)) {
 				throw new Exception("failed to parse passed in variable $name: $str_value");
 			}
@@ -1705,122 +2427,106 @@ class lessc {
 			$this->set($name, $value);
 		}
 	}
-	
-	// parse and compile buffer
-	function parse($str = null, $initial_variables = null) {
-		$locale = setlocale(LC_NUMERIC, 0);
-		setlocale(LC_NUMERIC, "C");
-		$root = $this->parseTree($str);
-
-		if ($initial_variables) $this->injectVariables($initial_variables);
-		$out = $this->compileBlock($root);
-		setlocale(LC_NUMERIC, $locale);
-		return $out;
-	}
-
-	function throwParseError($msg = 'parse error') {
-		$line = $this->line + substr_count(substr($this->buffer, 0, $this->count), "\n");
-		if (isset($this->fileName)) {
-			$loc = $this->fileName.' on line '.$line;
-		} else {
-			$loc = "line: ".$line;
-		}
-
-		if ($this->peek("(.*?)(\n|$)", $m))
-			throw new exception($msg.': failed at `'.$m[1].'` '.$loc);
-	}
 
 	/**
-	 * Initialize any static state, can initialize parser for a file
+	 * Remove comments from $text
+	 *
+	 * todo: make it work for all functions, not just url
+	 *
+	 * @param $text
+	 *
+	 * @return string
 	 */
-	function __construct($fname = null, $opts = null) {
-		if (!self::$operatorString) {
-			self::$operatorString = 
-				'('.implode('|', array_map(array($this, 'preg_quote'),
-					array_keys(self::$precedence))).')';
-		}
-
-		if ($fname) {
-			if (!is_file($fname)) {
-				throw new Exception('load error: failed to find '.$fname);
-			}
-			$pi = pathinfo($fname);
-
-			$this->fileName = $fname;
-			$this->importDir = $pi['dirname'].'/';
-			$this->buffer = file_get_contents($fname);
-
-			$this->addParsedFile($fname);
-		}
-	}
-
-	// remove comments from $text
-	// todo: make it work for all functions, not just url
-	function removeComments($text) {
+	public function removeComments($text)
+	{
 		$look = array(
 			'url(', '//', '/*', '"', "'"
 		);
 
 		$out = '';
 		$min = null;
-		$done = false;
 		while (true) {
 			// find the next item
 			foreach ($look as $token) {
 				$pos = strpos($text, $token);
 				if ($pos !== false) {
-					if (!isset($min) || $pos < $min[1]) $min = array($token, $pos);
+					if ($min === null || $pos < $min[1]) {
+						$min = array($token, $pos);
+					}
 				}
 			}
 
-			if (is_null($min)) break;
+			if ($min === null) {
+				break;
+			}
 
 			$count = $min[1];
 			$skip = 0;
 			$newlines = 0;
 			switch ($min[0]) {
-			case 'url(':
-				if (preg_match('/url\(.*?\)/', $text, $m, 0, $count))
-					$count += strlen($m[0]) - strlen($min[0]);
-				break;
-			case '"':
-			case "'":
-				if (preg_match('/'.$min[0].'.*?'.$min[0].'/', $text, $m, 0, $count))
+				case 'url(':
+					if (preg_match('/url\(.*?\)/', $text, $m, 0, $count)) {
+						$count += strlen($m[0]) - strlen($min[0]);
+					}
+					break;
+				case '"':
+				case "'":
+				if (preg_match('/' . $min[0] . '.*?' . $min[0] . '/', $text, $m, 0, $count)) {
 					$count += strlen($m[0]) - 1;
-				break;
-			case '//':
-				$skip = strpos($text, "\n", $count);
-				if ($skip === false) $skip = strlen($text) - $count;
-				else $skip -= $count;
-				break;
-			case '/*': 
-				if (preg_match('/\/\*.*?\*\//s', $text, $m, 0, $count)) {
-					$skip = strlen($m[0]);
-					$newlines = substr_count($m[0], "\n");
 				}
-				break;
+					break;
+				case '//':
+					$skip = strpos($text, "\n", $count);
+					if ($skip === false) {
+						$skip = strlen($text) - $count;
+					}
+					else {
+						$skip -= $count;
+					}
+					break;
+				case '/*':
+					if (preg_match('/\/\*.*?\*\//s', $text, $m, 0, $count)) {
+						$skip = strlen($m[0]);
+						$newlines = substr_count($m[0], "\n");
+					}
+					break;
 			}
 
-			if ($skip == 0) $count += strlen($min[0]);
+			if ($skip == 0) {
+				$count += strlen($min[0]);
+			}
 
-			$out .= substr($text, 0, $count).str_repeat("\n", $newlines);
+			$out .= substr($text, 0, $count) . str_repeat("\n", $newlines);
 			$text = substr($text, $count + $skip);
 
 			$min = null;
 		}
 
-		return $out.$text;
+		return $out . $text;
 	}
 
-	public function allParsedFiles() { return $this->allParsedFiles; }
-	protected function addParsedFile($file) {
-		$this->allParsedFiles[realpath($file)] = filemtime($file);
+	public function allParsedFiles()
+	{
+		return $this->allParsedFiles;
+	}
+
+	protected function addParsedFile($file)
+	{
+		$file = realpath($file);
+		$this->allParsedFiles[$file] = filemtime($file);
 	}
 
 
-	// compile to $in to $out if $in is newer than $out
-	// returns true when it compiles, false otherwise
-	public static function ccompile($in, $out) {
+	/**
+	 * Compile $in to $out if $in is newer than $out
+	 *
+	 * @param $in
+	 * @param $out
+	 *
+	 * @return bool true when it compiles, false otherwise
+	 */
+	public static function ccompile($in, $out)
+	{
 		if (!is_file($out) || filemtime($in) > filemtime($out)) {
 			$less = new lessc($in);
 			file_put_contents($out, $less->parse());
@@ -1832,25 +2538,27 @@ class lessc {
 
 	/**
 	 * Execute lessphp on a .less file or a lessphp cache structure
-	 * 
+	 *
 	 * The lessphp cache structure contains information about a specific
 	 * less file having been parsed. It can be used as a hint for future
 	 * calls to determine whether or not a rebuild is required.
-	 * 
+	 *
 	 * The cache structure contains two important keys that may be used
 	 * externally:
-	 * 
+	 *
 	 * compiled: The final compiled CSS
 	 * updated: The time (in seconds) the CSS was last compiled
-	 * 
+	 *
 	 * The cache structure is a plain-ol' PHP associative array and can
 	 * be serialized and unserialized without a hitch.
-	 * 
+	 *
 	 * @param mixed $in Input
 	 * @param bool $force Force rebuild?
+	 *
 	 * @return array lessphp cache structure
 	 */
-	public static function cexecute($in, $force = false) {
+	public static function cexecute($in, $force = false)
+	{
 
 		// assume no root
 		$root = null;
@@ -1858,13 +2566,13 @@ class lessc {
 		if (is_string($in)) {
 			$root = $in;
 		} elseif (is_array($in) and isset($in['root'])) {
-			if ($force or ! isset($in['files'])) {
+			if ($force or !isset($in['files'])) {
 				// If we are forcing a recompile or if for some reason the
 				// structure does not contain any file information we should
 				// specify the root to trigger a rebuild.
 				$root = $in['root'];
 			} elseif (isset($in['files']) and is_array($in['files'])) {
-				foreach ($in['files'] as $fname => $ftime ) {
+				foreach ($in['files'] as $fname => $ftime) {
 					if (!file_exists($fname) or filemtime($fname) > $ftime) {
 						// One of the files we knew about previously has changed
 						// so we should look at our incoming root again.
@@ -1874,7 +2582,7 @@ class lessc {
 				}
 			}
 		} else {
-			// TODO: Throw an exception? We got neither a string nor something
+			// TODO: Throw an Exception? We got neither a string nor something
 			// that looks like a compatible lessphp cache structure.
 			return null;
 		}
@@ -1893,7 +2601,5 @@ class lessc {
 			// we were given initially.
 			return $in;
 		}
-
 	}
 }
-

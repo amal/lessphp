@@ -1,7 +1,7 @@
 {
 	"name": "leafo/lessphp",
 	"type": "library",
-	"description": "lessphp is a compiler for LESS written in PHP",
+	"description": "lessphp is a compiler for LESS written in PHP. Current package is fork of original lib.",
 	"homepage": "http://leafo.net/lessphp/",
 	"license": [
 		"MIT",
@@ -12,6 +12,11 @@
 			"name": "Leaf Corcoran",
 			"email": "leafot@gmail.com",
 			"homepage": "http://leafo.net"
+		},
+		{
+			"name": "Amal Samally",
+			"email": "amal@samally.ru",
+			"homepage": "http://samally.ru"
 		}
 	],
 	"autoload": {
